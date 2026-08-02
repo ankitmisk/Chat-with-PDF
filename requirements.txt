@@ -1,8 +1,8 @@
 streamlit
 pypdf2
-langchain
+langchain-core
+langchain-text-splitters
 langchain-community
 langchain-google-genai
 faiss-cpu
 python-dotenv
-langchain.text_splitter
