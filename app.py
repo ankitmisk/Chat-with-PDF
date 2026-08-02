@@ -1,12 +1,12 @@
 import streamlit as st  # type: ignore
 import os
 from PyPDF2 import PdfReader  # type: ignore
-from langchain.text_splitter import RecursiveCharacterTextSplitter  # type: ignore
+from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI  # type: ignore
 from langchain_community.vectorstores import FAISS  # type: ignore
-from langchain.chains.combine_documents import create_stuff_documents_chain  # type: ignore
-from langchain.chains import create_retrieval_chain  # type: ignore
-from langchain.prompts import PromptTemplate  # type: ignore
+from langchain_core.prompts import PromptTemplate  # type: ignore
+from langchain_core.output_parsers import StrOutputParser  # type: ignore
+from langchain_core.runnables import RunnablePassthrough  # type: ignore
 from dotenv import load_dotenv
 import logging
 
@@ -19,6 +19,10 @@ load_dotenv()
 # Prefer a key from the environment; fall back to letting the user paste one in.
 if "google_api_key" not in st.session_state:
     st.session_state.google_api_key = os.getenv("GOOGLE_API_KEY", "")
+
+# Current, non-preview model names (langchain-google-genai 4.x)
+EMBEDDING_MODEL = "gemini-embedding-001"
+CHAT_MODEL = "gemini-2.5-flash"
 
 
 def get_pdf_text(pdf_docs):
@@ -58,7 +62,7 @@ def get_vector_store(text_chunks, api_key):
             raise ValueError("No text chunks to process")
 
         embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001",
+            model=EMBEDDING_MODEL,
             google_api_key=api_key
         )
 
@@ -78,7 +82,12 @@ def get_vector_store(text_chunks, api_key):
         return False
 
 
-def get_conversational_chain(api_key):
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
+def get_rag_chain(retriever, api_key):
+    """Build a simple retrieval-augmented generation chain with LCEL."""
     try:
         prompt_template = """
         Answer based on the provided context. If the query is unrelated to the context, provide a general response from external knowledge sources.
@@ -90,13 +99,20 @@ def get_conversational_chain(api_key):
         Answer:"""
 
         model = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash-002",
+            model=CHAT_MODEL,
             temperature=0.3,
             google_api_key=api_key
         )
 
         prompt = PromptTemplate.from_template(prompt_template)
-        return create_stuff_documents_chain(model, prompt)
+
+        rag_chain = (
+            {"context": retriever | format_docs, "input": RunnablePassthrough()}
+            | prompt
+            | model
+            | StrOutputParser()
+        )
+        return rag_chain
 
     except Exception as e:
         logging.error(f"Model init error: {str(e)}")
@@ -115,7 +131,7 @@ def user_input(user_question, api_key):
 
         try:
             embeddings = GoogleGenerativeAIEmbeddings(
-                model="models/embedding-001",
+                model=EMBEDDING_MODEL,
                 google_api_key=api_key
             )
             vector_store = FAISS.load_local(
@@ -129,15 +145,14 @@ def user_input(user_question, api_key):
             return None
 
         retriever = vector_store.as_retriever()
-        document_chain = get_conversational_chain(api_key)
+        rag_chain = get_rag_chain(retriever, api_key)
 
-        if not document_chain:
+        if not rag_chain:
             return None
 
         try:
-            retrieval_chain = create_retrieval_chain(retriever, document_chain)
-            response = retrieval_chain.invoke({"input": user_question})
-            return response.get("answer", "No answer found")
+            answer = rag_chain.invoke(user_question)
+            return answer or "No answer found"
         except Exception as e:
             logging.error(f"Query error: {str(e)}")
             return "Error generating answer"
